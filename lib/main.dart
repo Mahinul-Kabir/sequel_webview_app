@@ -33,7 +33,14 @@ class WebViewScreen extends StatefulWidget {
 }
 
 class _WebViewScreenState extends State<WebViewScreen> {
-  static const double _pullToRefreshDistance = 90;
+  static const double _pullToRefreshDistance = 110;
+  static const double _pullIndicatorMaxOffset = 90;
+  static const double _pullIndicatorSize = 30;
+  static const Duration _pullIndicatorFadeDuration = Duration(milliseconds: 180);
+  static const Duration _pullIndicatorSlideDuration =
+      Duration(milliseconds: 160);
+  static const Duration _pullIndicatorFadeOutDelay =
+      Duration(milliseconds: 180);
 
   late final WebViewController _controller;
 
@@ -43,6 +50,11 @@ class _WebViewScreenState extends State<WebViewScreen> {
   double? _pullStartY;
   double _pullDistance = 0;
   Future<bool>? _pullStartedAtTop;
+  bool _pullStartedAtTopConfirmed = false;
+  bool _isPullRefreshIndicatorMounted = false;
+  bool _isPullRefreshIndicatorVisible = false;
+  bool _isPullRefreshWaitingForPageFinish = false;
+  Timer? _pullRefreshFadeOutTimer;
 
   DateTime? lastPressed;
 
@@ -68,6 +80,11 @@ class _WebViewScreenState extends State<WebViewScreen> {
             setState(() {
               isLoading = false;
             });
+
+            if (_isPullRefreshWaitingForPageFinish) {
+              _isPullRefreshWaitingForPageFinish = false;
+              _schedulePullRefreshIndicatorHide();
+            }
           },
           onWebResourceError: (WebResourceError error) {
             unawaited(checkInternet());
@@ -134,7 +151,29 @@ class _WebViewScreenState extends State<WebViewScreen> {
 
     _pullStartY = event.position.dy;
     _pullDistance = 0;
-    _pullStartedAtTop = _isWebViewScrolledToTop();
+    _pullStartedAtTopConfirmed = false;
+    _pullRefreshFadeOutTimer?.cancel();
+    _pullRefreshFadeOutTimer = null;
+
+    if (_isPullRefreshIndicatorMounted || _isPullRefreshIndicatorVisible) {
+      setState(() {
+        _isPullRefreshIndicatorMounted = false;
+        _isPullRefreshIndicatorVisible = false;
+      });
+    }
+
+    final pullStartedAtTop = _isWebViewScrolledToTop();
+    _pullStartedAtTop = pullStartedAtTop;
+
+    pullStartedAtTop.then((isAtTop) {
+      if (!mounted || _pullStartedAtTop != pullStartedAtTop) {
+        return;
+      }
+
+      setState(() {
+        _pullStartedAtTopConfirmed = isAtTop;
+      });
+    });
   }
 
   void _handleWebViewPointerMove(PointerMoveEvent event) {
@@ -146,6 +185,13 @@ class _WebViewScreenState extends State<WebViewScreen> {
     final currentDistance = event.position.dy - pullStartY;
     if (currentDistance > _pullDistance) {
       _pullDistance = currentDistance;
+    }
+
+    if (_pullStartedAtTopConfirmed && currentDistance > 0) {
+      setState(() {
+        _isPullRefreshIndicatorMounted = true;
+        _isPullRefreshIndicatorVisible = true;
+      });
     }
   }
 
@@ -176,6 +222,8 @@ class _WebViewScreenState extends State<WebViewScreen> {
       return;
     }
 
+    _isPullRefreshWaitingForPageFinish = true;
+    _showPullRefreshIndicator();
     await _controller.reload();
   }
 
@@ -183,6 +231,63 @@ class _WebViewScreenState extends State<WebViewScreen> {
     _pullStartY = null;
     _pullDistance = 0;
     _pullStartedAtTop = null;
+    _pullStartedAtTopConfirmed = false;
+
+    if (!_isPullRefreshWaitingForPageFinish) {
+      _schedulePullRefreshIndicatorHide();
+    }
+  }
+
+  void _showPullRefreshIndicator() {
+    _pullRefreshFadeOutTimer?.cancel();
+    _pullRefreshFadeOutTimer = null;
+
+    if (!mounted) {
+      _isPullRefreshIndicatorMounted = true;
+      _isPullRefreshIndicatorVisible = true;
+      return;
+    }
+
+    setState(() {
+      _isPullRefreshIndicatorMounted = true;
+      _isPullRefreshIndicatorVisible = true;
+    });
+  }
+
+  void _schedulePullRefreshIndicatorHide() {
+    _pullRefreshFadeOutTimer?.cancel();
+
+    if (!_isPullRefreshIndicatorMounted && !_isPullRefreshIndicatorVisible) {
+      return;
+    }
+
+    _pullRefreshFadeOutTimer =
+        Timer(_pullIndicatorFadeOutDelay, _hidePullRefreshIndicator);
+  }
+
+  void _hidePullRefreshIndicator() {
+    _pullRefreshFadeOutTimer?.cancel();
+    _pullRefreshFadeOutTimer = null;
+
+    if (!mounted) {
+      _isPullRefreshIndicatorMounted = false;
+      _isPullRefreshIndicatorVisible = false;
+      return;
+    }
+
+    setState(() {
+      _isPullRefreshIndicatorVisible = false;
+    });
+
+    Timer(_pullIndicatorFadeDuration, () {
+      if (!mounted || _isPullRefreshIndicatorVisible) {
+        return;
+      }
+
+      setState(() {
+        _isPullRefreshIndicatorMounted = false;
+      });
+    });
   }
 
   Future<bool> _isWebViewScrolledToTop() async {
@@ -214,8 +319,15 @@ class _WebViewScreenState extends State<WebViewScreen> {
         double.infinity;
   }
 
+  double get _pullIndicatorProgress =>
+      (_pullDistance / _pullToRefreshDistance).clamp(0, 1);
+
+  double get _pullIndicatorTopOffset =>
+      (_pullIndicatorProgress * _pullIndicatorMaxOffset) - _pullIndicatorSize;
+
   @override
   void dispose() {
+    _pullRefreshFadeOutTimer?.cancel();
     connectivitySubscription?.cancel();
     super.dispose();
   }
@@ -250,7 +362,55 @@ class _WebViewScreenState extends State<WebViewScreen> {
 
             if (isLoading && !isOffline)
               const Center(
-                child: CircularProgressIndicator(),
+                child: CircularProgressIndicator(
+                  color: Colors.black,
+                ),
+              ),
+
+            if (_isPullRefreshIndicatorMounted && !isOffline)
+              AnimatedPositioned(
+                duration: _pullIndicatorSlideDuration,
+                curve: Curves.easeOutCubic,
+                top: MediaQuery.paddingOf(context).top +
+                    (_isPullRefreshIndicatorVisible
+                        ? _pullIndicatorTopOffset
+                        : -_pullIndicatorSize),
+                left: 0,
+                right: 0,
+                child: AnimatedOpacity(
+                  duration: _pullIndicatorFadeDuration,
+                  curve: Curves.easeOut,
+                  opacity: _isPullRefreshIndicatorVisible ? 1 : 0,
+                  child: IgnorePointer(
+                    child: Center(
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          shape: BoxShape.circle,
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withValues(alpha: 0.08),
+                              blurRadius: 3,
+                              offset: const Offset(0, 1),
+                            ),
+                          ],
+                        ),
+                        child: SizedBox(
+                          width: _pullIndicatorSize,
+                          height: _pullIndicatorSize,
+                          child: Padding(
+                            padding: const EdgeInsets.all(6),
+                            child: CircularProgressIndicator(
+                              strokeWidth: 1.8,
+                              value: _pullIndicatorProgress,
+                              color: Colors.black,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
               ),
 
             if (isOffline)
